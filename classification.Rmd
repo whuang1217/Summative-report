@@ -1,0 +1,533 @@
+---
+title: "R Notebook"
+output: html_notebook
+---
+
+data
+```{r}
+library(dplyr)
+
+loan_data = read.csv('https://www.louisaslett.com/Courses/MISCADA/bank_personal_loan.csv', header = TRUE)
+
+head(loan_data)
+
+loan_data <-  loan_data |> 
+  select(-ZIP.Code)
+
+summary(loan_data)
+```
+
+```{r}
+library("skimr")
+
+skim(loan_data)
+```
+
+visualization
+```{r}
+library(ggplot2)
+library(purrr)
+library(tidyr)
+
+ggplot(data = gather(loan_data), aes(x = value, fill = key)) +
+  geom_histogram(bins = 10, color = "black") +
+  facet_wrap(~key, nrow = 4, ncol = 3, scales = "free") +
+  theme_bw()
+```
+
+
+```{r}
+DataExplorer::plot_bar(loan_data, ncol = 3)
+
+DataExplorer::plot_histogram(loan_data, ncol = 3)
+
+DataExplorer::plot_boxplot(loan_data, by = "Personal.Loan", ncol = 3)
+
+```
+
+transfer data to as.factor
+```{r}
+loan_data$Personal.Loan = as.factor(loan_data$Personal.Loan)
+# loan_data$Securities.Account = as.factor(loan_data$Securities.Account)
+# loan_data$CD.Account = as.factor(loan_data$CD.Account)
+# loan_data$Online = as.factor(loan_data$Online)
+# loan_data$CreditCard = as.factor(loan_data$CreditCard)
+# loan_data$Family = as.factor(loan_data$Family)
+# loan_data$Education = as.factor(loan_data$Education)
+
+```
+
+Task and resampling
+```{r}
+library("data.table")
+library("mlr3verse")
+
+```
+
+
+```{r}
+set.seed(212) # set seed for reproducibility
+loan_task <- TaskClassif$new(id = "PersonalLoan",
+                               backend = loan_data, # <- NB: no na.omit() this time
+                               target = "Personal.Loan",
+                               positive = "1")
+```
+
+
+```{r}
+set.seed(212)
+cv5 <- rsmp("cv", folds = 5)
+cv5$instantiate(loan_task)
+bootstrap <- rsmp("bootstrap", ratio=0.8, repeats=3)
+bootstrap$instantiate(loan_task)
+holdout <- rsmp("holdout", ratio=0.7)
+holdout$instantiate(loan_task)
+```
+
+
+```{r}
+set.seed(212)
+pl_missing <- po("fixfactors") %>>%
+  po("removeconstants") %>>%
+  po("imputesample", affect_columns = selector_type(c("ordered", "factor"))) %>>%
+  po("imputemean")
+lrn_baseline <- lrn("classif.featureless", predict_type = "prob")
+lrn_cart <- lrn("classif.rpart", predict_type = "prob")
+lrn_cart_cv <- lrn("classif.rpart", predict_type = "prob", xval = 10)
+lrn_cart_cp <- lrn("classif.rpart", predict_type = "prob", cp = 0.016)
+lrn_xgboost <- lrn("classif.xgboost", predict_type = "prob")
+pl_xgb <- po("encode") %>>%
+  po(lrn_xgboost)
+lrn_log_reg <- lrn("classif.log_reg", predict_type = "prob")
+pl_log_reg <- pl_missing %>>%
+  po(lrn_log_reg)
+lrn_ranger   <- lrn("classif.ranger", predict_type = "prob")
+
+```
+
+
+
+
+
+
+
+```{r}
+set.seed(212)
+res <- benchmark(data.table(
+  task       = list(loan_task),
+  learner    = list(lrn_baseline,
+                    lrn_cart,
+                    lrn_cart_cv,
+                    lrn_cart_cp,
+                    lrn_xgboost,
+                    pl_xgb,
+                    lrn_log_reg,
+                    pl_log_reg,
+                    lrn_ranger
+                    ),
+  resampling = list(cv5)
+), store_models = TRUE)
+res
+res$aggregate(list(msr("classif.ce"),
+                   msr("classif.acc"),
+                   msr("classif.auc"),
+                   msr("classif.fpr"),
+                   msr("classif.fnr")))
+
+
+```
+
+
+
+
+```{r}
+set.seed(212)
+res <- benchmark(data.table(
+  task       = list(loan_task),
+  learner    = list(lrn_baseline,
+                    lrn_cart,
+                    lrn_cart_cv,
+                    lrn_cart_cp,
+                    lrn_xgboost,
+                    pl_xgb,
+                    lrn_log_reg,
+                    pl_log_reg,
+                    lrn_ranger
+                    ),
+  resampling = list(bootstrap)
+), store_models = TRUE)
+res
+res$aggregate(list(msr("classif.ce"),
+                   msr("classif.acc"),
+                   msr("classif.auc"),
+                   msr("classif.fpr"),
+                   msr("classif.fnr")))
+
+```
+
+
+```{r}
+set.seed(118)
+res <- benchmark(data.table(
+  task       = list(loan_task),
+  learner    = list(lrn_baseline,
+                    lrn_cart,
+                    lrn_cart_cv,
+                    lrn_cart_cp,
+                    lrn_xgboost,
+                    pl_xgb,
+                    lrn_log_reg,
+                    pl_log_reg,
+                    lrn_ranger
+                    ),
+  resampling = list(holdout)
+), store_models = TRUE)
+res
+res$aggregate(list(msr("classif.ce"),
+                   msr("classif.acc"),
+                   msr("classif.auc"),
+                   msr("classif.fpr"),
+                   msr("classif.fnr")))
+
+
+```
+
+
+
+```{r}
+set.seed(212)
+#library("rpart.plot")
+trees <- res$resample_result(9)
+tree1 <- trees$learners[[1]]
+tree1_rpart <- tree1$model
+tree1_rpart
+```
+
+
+
+
+
+
+
+```{r}
+set.seed(118)
+library(mlr3tuning)
+tuning <- ps( 
+  mtry = p_int(lower = 1, upper = 10),
+  num.trees = p_int( lower = 1, upper = 100),
+  max.depth = p_int(lower = 2, upper = 10),
+  min.node.size = p_int(lower = 1, upper = 10)
+  )
+
+Ranger_instance <- TuningInstanceSingleCrit$new(
+  task = loan_task,
+  learner = lrn_ranger,
+  resampling = holdout,
+  measure = msr("classif.acc"),
+  search_space = tuning,
+  terminator = trm("evals", n_evals = 100)
+)
+tuning_strategy <- tnr("grid_search", resolution = 10)
+
+tuning_strategy$optimize(Ranger_instance) 
+
+```
+
+'gini','extratrees','hellinger
+```{r}
+
+lrn_ranger1   <- lrn("classif.ranger", predict_type = "prob",mtry=5, num.trees=45, max.depth=8, min.node.size=2, splitrule = "gini")
+lrn_ranger2   <- lrn("classif.ranger", predict_type = "prob",mtry=5, num.trees=45, max.depth=8, min.node.size=2, splitrule = "extratrees")
+lrn_ranger3   <- lrn("classif.ranger", predict_type = "prob",mtry=5, num.trees=45, max.depth=8, min.node.size=2, splitrule = "hellinger")
+```
+
+```{r}
+set.seed(21)
+res_ranger1 <- resample(loan_task, lrn_ranger1, holdout, store_models = TRUE)
+res_ranger2 <- resample(loan_task, lrn_ranger2, holdout, store_models = TRUE)
+res_ranger3 <- resample(loan_task, lrn_ranger3, holdout, store_models = TRUE)
+
+# Look at accuracy
+
+res_ranger1$aggregate(list(msr("classif.ce"),
+                   msr("classif.acc"),
+                   msr("classif.auc"),
+                   msr("classif.fpr"),
+                   msr("classif.fnr")))
+
+res_ranger2$aggregate(list(msr("classif.ce"),
+                   msr("classif.acc"),
+                   msr("classif.auc"),
+                   msr("classif.fpr"),
+                   msr("classif.fnr")))
+
+res_ranger3$aggregate(list(msr("classif.ce"),
+                   msr("classif.acc"),
+                   msr("classif.auc"),
+                   msr("classif.fpr"),
+                   msr("classif.fnr")))
+
+
+```
+
+```{r}
+lrn
+```
+
+
+```{r}
+# measures <- list(
+#   msr("classif.acc"),
+#   msr("classif.auc")
+# )
+# Ranger_instance <- TuningInstanceSingleCrit$new(
+#   task = loan_task,
+#   learner = lrn_ranger,
+#   resampling = holdout,
+#   measure = measures,
+#   search_space = tuning,
+#   terminator = trm("evals", n_evals = 100)
+# )
+# tuning_strategy <- tnr("grid_search", resolution = 10)
+# 
+# tuning_strategy$optimize(Ranger_instance)
+```
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+```{r}
+
+```{r}
+### ASML Classification Lab 4 -- Deep Learning Intro ###
+########################################################
+
+# NOTE: This Lab requires at least 8GB RAM, so if you are using
+#       Github Codespaces, make sure to launch on the 4-core server!
+
+## Introduction
+#
+# Some of the software in this lab doesn't work well in notebooks and
+# we want to know how to use ordinary script files anyway, since these
+# are more commonly used for serious programming work.
+#
+# We will continue looking at the credit dataset from the last lab and
+# do an analysis using the deep learning AI techniques that we learned
+# in the last three lectures).
+#
+# First, load the dataset into R:
+
+# data("credit_data", package = "modeldata")
+# head(credit_data)
+credit_data = read.csv('https://www.louisaslett.com/Courses/MISCADA/bank_personal_loan.csv', header = TRUE)
+colnames(credit_data)[9] <- "Status"
+credit_data$Status <- ifelse(credit_data$Status == 0, "bad", "good")
+# We assume you remember what this data is like from previous labs!  If
+# not, go back and remind yourself before continuing.
+#
+# We first split the data into train/validate/test.  We won't do cross
+# validation here just because deep learning is the most computationally
+# expensive method we've looked at so far and we don't have the time in
+# the lab to wait for a full 5-fold cross validation to run.
+# Do try yourself outside the lab.
+library("rsample")
+set.seed(212) # by setting the seed we know everyone will see the same results
+# First get the training
+credit_split <- initial_split(credit_data)
+credit_train <- training(credit_split)
+# Then further split the training into validate and test
+credit_split2 <- initial_split(testing(credit_split), 0.5)
+credit_validate <- training(credit_split2)
+credit_test <- testing(credit_split2)
+
+# The first thing we need to do is to transform the data into a form
+# which works with deep learning.
+#
+# - Every feature must be numeric;
+#
+# - use one-hot coding for categorical data;
+#
+# - there must be no missing values;
+#
+# - each feature should be normalised to mean zero, standard deviation 1
+# (or tranformed to the range [0,1])
+#
+# We use the recipes package to do this so you can see an alternative
+# to the pipelines from MLR3 which gives you more manual control.
+#
+# One of the special things about the recipes package is that it
+# enables computing the scaling factors on training data and to then use
+# this on validation and testing without having to keep the training
+# data around later on.  This is because it is *very* important that you
+# do not independently scale and centre the validation and testing
+# data!!  Just to repeat, because this is so important:
+#
+# ** Do not independently scale and centre the validation and testing data!! **
+#
+# The act of scaling and centring is part of the analysis
+# pipeline and the mean and standard deviation estimated from training
+# data are effectively parameters of the ultimate model.
+library("recipes")
+
+cake <- recipe(Status ~ ., data = credit_data) %>%
+  step_impute_mean(all_numeric()) %>% # impute missings on numeric values with the mean
+  step_center(all_numeric()) %>% # center by subtracting the mean from all numeric features
+  step_scale(all_numeric()) %>% # scale by dividing by the standard deviation on all numeric features
+  step_unknown(all_nominal(), -all_outcomes()) %>% # create a new factor level called "unknown" to account for NAs in factors, except for the outcome (response can't be NA)
+  step_dummy(all_nominal(), one_hot = TRUE) %>% # turn all factors into a one-hot coding
+  prep(training = credit_train) # learn all the parameters of preprocessing on the training data
+
+credit_train_final <- bake(cake, new_data = credit_train) # apply preprocessing to training data
+credit_validate_final <- bake(cake, new_data = credit_validate) # apply preprocessing to validation data
+credit_test_final <- bake(cake, new_data = credit_test) # apply preprocessing to testing data
+
+# Have a look at this data to see what has been done
+
+
+
+## Keras
+#
+# Although MLR3 does have support for fitting deep learning models as
+# part of its pipeline, for the first time you use them we'd like to
+# have full control (and often you want more fine detail control when
+# fitting deep learning than is needed with classical ML methods).
+#
+# Therefore we'll directly interface to Keras, a deep learning interface
+# developed by François Chollet from Google which builds Tensorflow models.
+
+library("keras")
+
+# The lab server is already setup with Keras, but if you are running
+# this on your own machine then you may need to install it with the
+# command install_keras().  Please do NOT run that command on the lab
+# server as it will download gigabytes of data for every user
+# unnecessarily!
+
+# We have one more data preparation step to perform, because Keras
+# expects to receive the data in matrix form and wants the features and
+# responses separately
+
+credit_train_x <- credit_train_final %>%
+  select(-starts_with("Status_")) %>%
+  as.matrix()
+credit_train_y <- credit_train_final %>%
+  select(Status_bad) %>%
+  as.matrix()
+
+credit_validate_x <- credit_validate_final %>%
+  select(-starts_with("Status_")) %>%
+  as.matrix()
+credit_validate_y <- credit_validate_final %>%
+  select(Status_bad) %>%
+  as.matrix()
+
+credit_test_x <- credit_test_final %>%
+  select(-starts_with("Status_")) %>%
+  as.matrix()
+credit_test_y <- credit_test_final %>%
+  select(Status_bad) %>%
+  as.matrix()
+
+
+
+# We can now start to construct our deep neural network architecture
+# We make a neural network with two hidden layers, 32 neurons in the
+# first, 32 in second and an output to a binary classification
+
+# We learned in lectures that we have methods that can combat this and still
+# allow fitting very deep neural networks:
+deep.net <- keras_model_sequential() %>%
+  layer_dense(units = 32, activation = "relu",
+              input_shape = c(ncol(credit_train_x))) %>%
+  layer_batch_normalization() %>%
+  layer_dropout(rate = 0.4) %>%
+  layer_dense(units = 32, activation = "relu") %>%
+  layer_batch_normalization() %>%
+  layer_dropout(rate = 0.4) %>%
+  layer_dense(units = 32, activation = "relu") %>%
+  layer_batch_normalization() %>%
+  layer_dropout(rate = 0.4) %>%
+  layer_dense(units = 32, activation = "relu") %>%
+  layer_batch_normalization() %>%
+  layer_dropout(rate = 0.4) %>%
+  layer_dense(units = 1, activation = "sigmoid")
+# Have a look at it
+#deep.net
+
+deep.net %>% compile(
+  loss = "binary_crossentropy",
+  optimizer = optimizer_rmsprop(),
+  metrics = c("accuracy")
+)
+
+deep.net %>% fit(
+  credit_train_x, credit_train_y,
+  epochs = 50, batch_size = 32,
+  validation_data = list(credit_validate_x, credit_validate_y),
+)
+
+# To get the probability predictions on the test set:
+pred_test_prob <- deep.net %>% predict(credit_test_x)
+
+# To get the raw classes (assuming 0.5 cutoff):
+pred_test_res <- deep.net %>% predict(credit_test_x) %>% `>`(0.5) %>% as.integer()
+
+# Confusion matrix/accuracy/AUC metrics
+# (recall, in Lab03 we got accuracy ~0.80 and AUC ~0.84 from the super learner,
+# and around accuracy ~0.76 and AUC ~0.74 from best other models)
+table(pred_test_res, credit_test_y)
+yardstick::accuracy_vec(as.factor(credit_test_y),
+                        as.factor(pred_test_res))
+yardstick::roc_auc_vec(factor(credit_test_y, levels = c("1","0")),
+                       c(pred_test_prob))
+
+
+
+```
+
+
+
+```{r}
+download.file("http://www.louisaslett.com/Courses/MISCADA/mnist.fst", "mnist.fst")
+mnist <- fst::read.fst("mnist.fst")
+```
+
+
+
+
+
+
+
+
+
+
+
+
+
+```
+
+
+```{r}
+```
+
+
+```{r}
+```
+
+Add a new chunk by clicking the *Insert Chunk* button on the toolbar or by pressing *Cmd+Option+I*.
+
+When you save the notebook, an HTML file containing the code and output will be saved alongside it (click the *Preview* button or press *Cmd+Shift+K* to preview the HTML file). 
+
+The preview shows you a rendered HTML copy of the contents of the editor. Consequently, unlike *Knit*, *Preview* does not run any R code chunks. Instead, the output of the chunk when it was last run in the editor is displayed.
+
